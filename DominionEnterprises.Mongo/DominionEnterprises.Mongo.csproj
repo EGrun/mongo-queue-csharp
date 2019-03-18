@@ -1,18 +1,34 @@
-<Project ToolsVersion="4.0" DefaultTargets="Rebuild" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+﻿<Project ToolsVersion="12.0" DefaultTargets="Rebuild" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <PropertyGroup>
     <OutputType>Library</OutputType>
     <AssemblyName>DominionEnterprises.Mongo</AssemblyName>
     <WarningLevel>4</WarningLevel>
     <DebugSymbols>true</DebugSymbols>
+    <TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>
+    <TargetFrameworkProfile />
+    <ProjectGuid>{73A5EF1F-0C38-4895-AE6A-131A36587ED6}</ProjectGuid>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+    <Prefer32Bit>false</Prefer32Bit>
+    <OutputPath>..\bin\</OutputPath>
   </PropertyGroup>
   <ItemGroup>
-    <Reference Include="System" />
     <Reference Include="MongoDB.Bson">
       <HintPath>..\libs\MongoDB.Bson.dll</HintPath>
     </Reference>
     <Reference Include="MongoDB.Driver">
       <HintPath>..\libs\MongoDB.Driver.dll</HintPath>
     </Reference>
+    <Reference Include="MongoDB.Driver.Core">
+      <HintPath>..\libs\MongoDB.Driver.Core.dll</HintPath>
+    </Reference>
+    <Reference Include="MongoDB.Driver.GridFS">
+      <HintPath>..\libs\MongoDB.Driver.GridFS.dll</HintPath>
+    </Reference>
+    <Reference Include="MongoDB.Driver.Legacy">
+      <HintPath>..\libs\MongoDB.Driver.Legacy.dll</HintPath>
+    </Reference>
+    <Reference Include="System" />
     <Reference Include="System.Configuration" />
   </ItemGroup>
   <ItemGroup>

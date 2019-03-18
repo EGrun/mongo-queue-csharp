@@ -26,8 +26,8 @@ namespace DominionEnterprises.Mongo
     {
         internal const int ACK_MULTI_BATCH_SIZE = 1000;
 
-        private readonly MongoCollection collection;
-        private readonly MongoGridFS gridfs;
+        private readonly IMongoCollection<BsonDocument> collection;
+        private readonly GridFSBucket gridfs;
 
         /// <summary>
         /// Construct MongoQueue with url, db name and collection name from app settings keys mongoQueueUrl, mongoQueueDb and mongoQueueCollection
@@ -49,8 +49,9 @@ namespace DominionEnterprises.Mongo
             if (db == null) throw new ArgumentNullException("db");
             if (collection == null) throw new ArgumentNullException("collection");
 
-            this.collection = new MongoClient(url).GetServer().GetDatabase(db).GetCollection(collection);
-            this.gridfs = this.collection.Database.GetGridFS(MongoGridFSSettings.Defaults);
+            var client = new MongoClient(url);
+            this.collection = client.GetDatabase(db).GetCollection<BsonDocument>(collection);
+            this.gridfs = new GridFSBucket(this.collection.Database);
         }
 
         /// <summary>
@@ -58,12 +59,12 @@ namespace DominionEnterprises.Mongo
         /// </summary>
         /// <param name="collection">collection</param>
         /// <exception cref="ArgumentNullException">collection is null</exception>
-        public Queue(MongoCollection collection)
+        public Queue(IMongoCollection<BsonDocument> collection)
         {
             if (collection == null) throw new ArgumentNullException("collection");
 
             this.collection = collection;
-            this.gridfs = collection.Database.GetGridFS(MongoGridFSSettings.Defaults);
+            this.gridfs = new GridFSBucket(this.collection.Database);
         }
 
         #region EnsureGetIndex
@@ -205,10 +206,9 @@ namespace DominionEnterprises.Mongo
                 throw new ArgumentNullException ("query");
 
             //reset stuck messages
-            collection.Update(
+            collection.UpdateMany(
                 new QueryDocument { { "running", true }, { "resetTimestamp", new BsonDocument("$lte", DateTime.UtcNow) } },
-                new UpdateDocument("$set", new BsonDocument("running", false)),
-                UpdateFlags.Multi
+                new UpdateDocument("$set", new BsonDocument("running", false))
             );
 
             var builtQuery = new QueryDocument("running", false);
@@ -250,21 +250,27 @@ namespace DominionEnterprises.Mongo
 
             while (true)
             {
-                var findModifyArgs = new FindAndModifyArgs { Query = builtQuery, SortBy = sort, Update = update, Fields = fields, Upsert = false };
-
-                var message = collection.FindAndModify(findModifyArgs).ModifiedDocument;
+                var message = collection.FindOneAndUpdate(
+                    builtQuery, 
+                    update, 
+                    new FindOneAndUpdateOptions<BsonDocument, BsonDocument>() {
+                        IsUpsert = false,
+                        ReturnDocument = ReturnDocument.After,
+                        Sort = sort,
+                        Projection = fields
+                    });
                 if (message != null)
                 {
                     var handleStreams = new List<KeyValuePair<BsonValue, Stream>>();
                     var messageStreams = new Dictionary<string, Stream>();
                     foreach (var streamId in message["streams"].AsBsonArray)
                     {
-                        var fileInfo = gridfs.FindOneById(streamId);
+                        var fileInfo  = gridfs.Find(new QueryDocument { { "_id", streamId } }).First();
 
-                        var stream = fileInfo.OpenRead();
+                        var stream = gridfs.OpenDownloadStream(streamId);
 
                         handleStreams.Add(new KeyValuePair<BsonValue, Stream>(streamId, stream));
-                        messageStreams.Add(fileInfo.Name, stream);
+                        messageStreams.Add(fileInfo.Filename, stream);
                     }
 
                     var handle = new Handle(message["_id"].AsObjectId, handleStreams);
@@ -341,12 +347,12 @@ namespace DominionEnterprises.Mongo
         {
             if (handle == null) throw new ArgumentNullException("handle");
 
-            collection.Remove(new QueryDocument("_id", handle.Id));
+            collection.DeleteOne(new QueryDocument("_id", handle.Id));
 
             foreach (var stream in handle.Streams)
             {
                 stream.Value.Dispose();
-                gridfs.DeleteById(stream.Key);
+                gridfs.Delete(stream.Key);
             }
         }
 
@@ -367,19 +373,19 @@ namespace DominionEnterprises.Mongo
                 if (ids.Count != ACK_MULTI_BATCH_SIZE)
                     continue;
 
-                collection.Remove(new QueryDocument("_id", new BsonDocument("$in", ids)));
+                collection.DeleteMany(new QueryDocument("_id", new BsonDocument("$in", ids)));
                 ids.Clear();
             }
 
             if (ids.Count > 0)
-                collection.Remove(new QueryDocument("_id", new BsonDocument("$in", ids)));
+                collection.DeleteMany(new QueryDocument("_id", new BsonDocument("$in", ids)));
 
             foreach (var handle in handles)
             {
                 foreach (var stream in handle.Streams)
                 {
                     stream.Value.Dispose();
-                    gridfs.DeleteById(stream.Key);
+                    gridfs.Delete(stream.Key);
                 }
             }
         }
@@ -469,13 +475,16 @@ namespace DominionEnterprises.Mongo
             {
                 var streamIds = new BsonArray();
                 foreach (var stream in streams)
-                    streamIds.Add(gridfs.Upload(stream.Value, stream.Key).Id);
+                    streamIds.Add(gridfs.UploadFromStream(stream.Key, stream.Value));
 
                 toSet["streams"] = streamIds;
             }
 
             //using upsert because if no documents found then the doc was removed (SHOULD ONLY HAPPEN BY SOMEONE MANUALLY) so we can just send
-            collection.Update(new QueryDocument("_id", handle.Id), new UpdateDocument("$set", toSet), UpdateFlags.Upsert);
+            collection.UpdateOne(
+                new QueryDocument("_id", handle.Id), 
+                new UpdateDocument("$set", toSet), 
+                new UpdateOptions { IsUpsert = true });
 
             foreach (var existingStream in handle.Streams)
                 existingStream.Value.Dispose();
@@ -483,7 +492,7 @@ namespace DominionEnterprises.Mongo
             if (streams != null)
             {
                 foreach (var existingStream in handle.Streams)
-                    gridfs.DeleteById(existingStream.Key);
+                    gridfs.Delete(existingStream.Key);
             }
         }
         #endregion
@@ -541,7 +550,7 @@ namespace DominionEnterprises.Mongo
 
             var streamIds = new BsonArray();
             foreach (var stream in streams)
-                streamIds.Add(gridfs.Upload(stream.Value, stream.Key).Id);
+                streamIds.Add(gridfs.UploadFromStream(stream.Key, stream.Value));
 
             var message = new BsonDocument
             {
@@ -554,25 +563,25 @@ namespace DominionEnterprises.Mongo
                 {"streams", streamIds},
             };
 
-            collection.Insert(message);
+            collection.InsertOne(message);
         }
         #endregion
 
         private void EnsureIndex(IndexKeysDocument index)
         {
             //if index is a prefix of any existing index we are good
-            foreach (var existingIndex in collection.GetIndexes())
+            foreach (var existingIndex in collection.Indexes.List().ToEnumerable())
             {
                 var names = index.Names;
                 var values = index.Values;
-                var existingNamesPrefix = existingIndex.Key.Names.Take(names.Count());
-                var existingValuesPrefix = existingIndex.Key.Values.Take(values.Count());
+                var existingNamesPrefix = existingIndex.Names.Take(names.Count());
+                var existingValuesPrefix = existingIndex.Values.Take(values.Count());
 
                 if (Enumerable.SequenceEqual(names, existingNamesPrefix) && Enumerable.SequenceEqual(values, existingValuesPrefix))
                     return;
             }
 
-            for (var i = 0; i < 5; ++i)
+            for (var i = 0; i < 1; ++i)
             {
                 for (var name = Guid.NewGuid().ToString(); name.Length > 0; name = name.Substring(0, name.Length - 1))
                 {
@@ -582,16 +591,18 @@ namespace DominionEnterprises.Mongo
 
                     try
                     {
-                        collection.CreateIndex(index, new IndexOptionsDocument { {"name", name }, { "background", true } });
+                        collection.Indexes.CreateOne(
+                            new CreateIndexModel<BsonDocument>(index,
+                            new CreateIndexOptions { Name = name, Background = true }));
                     }
                     catch (MongoCommandException)
                     {
                         //this happens when the name was too long
                     }
 
-                    foreach (var existingIndex in collection.GetIndexes())
+                    foreach (var existingIndex in collection.Indexes.List().ToEnumerable())
                     {
-                        if (existingIndex.Key == index)
+                        if (existingIndex["key"] == index)
                             return;
                     }
                 }

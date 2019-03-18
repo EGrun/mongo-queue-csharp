@@ -13,23 +13,35 @@ namespace DominionEnterprises.Mongo.Tests
     [TestFixture]
     public class QueueTests
     {
-        private MongoCollection collection;
-        private MongoGridFS gridfs;
+        private IMongoCollection<BsonDocument> collection;
+        private GridFSBucket gridfs;
         private Queue queue;
 
+        /*
+        private MongoCollection collection;
+        private MongoGridFS gridfs;
+        */
+    
         [SetUp]
         public virtual void Setup()
         {
-            collection = new MongoClient(ConfigurationManager.AppSettings["mongoQueueUrl"])
-                .GetServer()
-                .GetDatabase(ConfigurationManager.AppSettings["mongoQueueDb"])
-                .GetCollection(ConfigurationManager.AppSettings["mongoQueueCollection"]);
+            var credential = MongoCredential.CreateCredential("admin", "egAdmin", "gremlinz");
+            var serverUrl = ConfigurationManager.AppSettings["mongoQueueUrl"];
+            var clientSettings = new MongoClientSettings()
+            {
+                Server = new MongoServerAddress(serverUrl),
+                Credential = credential
+            };
 
-            collection.Drop();
+            var client = new MongoClient(serverUrl);
+            var db = client.GetDatabase(ConfigurationManager.AppSettings["mongoQueueDb"]);
+            collection = client.GetDatabase(ConfigurationManager.AppSettings["mongoQueueDb"])
+                .GetCollection<BsonDocument>(ConfigurationManager.AppSettings["mongoQueueCollection"]);
 
-            gridfs = collection.Database.GetGridFS(MongoGridFSSettings.Defaults);
-            gridfs.Files.Drop();
-            gridfs.Chunks.Drop();
+            db.DropCollection(ConfigurationManager.AppSettings["mongoQueueCollection"]);
+
+            this.gridfs = new GridFSBucket(this.collection.Database);
+            gridfs.Drop();
 
             queue = new Queue();
         }
@@ -67,9 +79,8 @@ namespace DominionEnterprises.Mongo.Tests
         public void ConstructCollectionObject()
         {
             var collection = new MongoClient(ConfigurationManager.AppSettings["mongoQueueUrl"])
-                .GetServer()
                 .GetDatabase(ConfigurationManager.AppSettings["mongoQueueDb"])
-                .GetCollection(ConfigurationManager.AppSettings["mongoQueueCollection"]);
+                .GetCollection<BsonDocument>(ConfigurationManager.AppSettings["mongoQueueCollection"]);
             new Queue(collection);
         }
         #endregion
@@ -81,16 +92,18 @@ namespace DominionEnterprises.Mongo.Tests
             queue.EnsureGetIndex(new IndexKeysDocument("type", 1), new IndexKeysDocument("boo", -1));
             queue.EnsureGetIndex(new IndexKeysDocument("another.sub", 1));
 
-            Assert.AreEqual(4, collection.GetIndexes().Count);
+            var indexes = collection.Indexes.List().ToList();
+
+            Assert.AreEqual(4, indexes.Count);
 
             var expectedOne = new IndexKeysDocument { { "running", 1 }, { "payload.type", 1 }, { "priority", 1 }, { "created", 1 }, { "payload.boo", -1 }, { "earliestGet", 1 } };
-            Assert.AreEqual(expectedOne, collection.GetIndexes()[1].Key);
+            Assert.AreEqual(expectedOne, indexes[1]["key"]);
 
             var expectedTwo = new IndexKeysDocument { { "running", 1 }, { "resetTimestamp", 1 } };
-            Assert.AreEqual(expectedTwo, collection.GetIndexes()[2].Key);
+            Assert.AreEqual(expectedTwo, indexes[2]["key"]);
 
             var expectedThree = new IndexKeysDocument { { "running", 1 }, { "payload.another.sub", 1 }, { "priority", 1 }, { "created", 1 }, { "earliestGet", 1 } };
-            Assert.AreEqual(expectedThree, collection.GetIndexes()[3].Key);
+            Assert.AreEqual(expectedThree, indexes[3]["key"]);
         }
 
         [Test]
@@ -98,13 +111,15 @@ namespace DominionEnterprises.Mongo.Tests
         {
             queue.EnsureGetIndex();
 
-            Assert.AreEqual(3, collection.GetIndexes().Count);
+            var indexes = collection.Indexes.List().ToList();
+
+            Assert.AreEqual(3, indexes.Count);
 
             var expectedOne = new IndexKeysDocument { { "running", 1 }, { "priority", 1 }, { "created", 1 }, { "earliestGet", 1 } };
-            Assert.AreEqual(expectedOne, collection.GetIndexes()[1].Key);
+            Assert.AreEqual(expectedOne, indexes[1]["key"]);
 
             var expectedTwo = new IndexKeysDocument { { "running", 1 }, { "resetTimestamp", 1 } };
-            Assert.AreEqual(expectedTwo, collection.GetIndexes()[2].Key);
+            Assert.AreEqual(expectedTwo, indexes[2]["key"]);
         }
 
         [Test]
@@ -154,13 +169,15 @@ namespace DominionEnterprises.Mongo.Tests
             queue.EnsureCountIndex(new IndexKeysDocument { { "type", 1 }, { "boo", -1 } }, false);
             queue.EnsureCountIndex(new IndexKeysDocument { { "another.sub", 1 } }, true);
 
-            Assert.AreEqual(3, collection.GetIndexes().Count);
+            var indexes = collection.Indexes.List().ToList();
+
+            Assert.AreEqual(3, indexes.Count);
 
             var expectedOne = new IndexKeysDocument { { "payload.type", 1 }, { "payload.boo", -1 } };
-            Assert.AreEqual(expectedOne, collection.GetIndexes()[1].Key);
+            Assert.AreEqual(expectedOne, indexes[1]["key"]);
 
             var expectedTwo = new IndexKeysDocument { { "running", 1 }, { "payload.another.sub", 1 } };
-            Assert.AreEqual(expectedTwo, collection.GetIndexes()[2].Key);
+            Assert.AreEqual(expectedTwo, indexes[2]["key"]);
         }
 
         [Test]
@@ -169,10 +186,12 @@ namespace DominionEnterprises.Mongo.Tests
             queue.EnsureCountIndex(new IndexKeysDocument { { "type", 1 }, { "boo", -1 } }, false);
             queue.EnsureCountIndex(new IndexKeysDocument { { "type", 1 } }, false);
 
-            Assert.AreEqual(2, collection.GetIndexes().Count);
+            var indexes = collection.Indexes.List().ToList();
+
+            Assert.AreEqual(3, indexes.Count);
 
             var expectedOne = new IndexKeysDocument { { "payload.type", 1 }, { "payload.boo", -1 } };
-            Assert.AreEqual(expectedOne, collection.GetIndexes()[1].Key);
+            Assert.AreEqual(expectedOne, indexes[1]["key"]);
         }
 
         [Test]
@@ -206,7 +225,7 @@ namespace DominionEnterprises.Mongo.Tests
             var message = queue.Get(new QueryDocument { { "key1", 0 }, { "key2", false } }, TimeSpan.MaxValue, TimeSpan.Zero);
             Assert.IsNull(message);
 
-            Assert.AreEqual(1, collection.Count());
+            Assert.AreEqual(1, collection.CountDocuments(new QueryDocument()));
         }
 
         [Test]
@@ -407,8 +426,8 @@ namespace DominionEnterprises.Mongo.Tests
             queue.Send(messageTwo);
 
             //sets to running
-            collection.Update(new QueryDocument("payload.key", 0), new UpdateDocument("$set", new BsonDocument { { "running", true }, { "resetTimestamp", DateTime.UtcNow } }));
-            collection.Update(new QueryDocument("payload.key", 1), new UpdateDocument("$set", new BsonDocument { { "running", true }, { "resetTimestamp", DateTime.UtcNow } }));
+            collection.UpdateOne(new QueryDocument("payload.key", 0), new UpdateDocument("$set", new BsonDocument { { "running", true }, { "resetTimestamp", DateTime.UtcNow } }));
+            collection.UpdateOne(new QueryDocument("payload.key", 1), new UpdateDocument("$set", new BsonDocument { { "running", true }, { "resetTimestamp", DateTime.UtcNow } }));
 
             Assert.AreEqual(2, collection.Count(new QueryDocument("running", true)));
 
@@ -475,12 +494,11 @@ namespace DominionEnterprises.Mongo.Tests
             queue.Send(new BsonDocument("key", "value"));
 
             var result = queue.Get(new QueryDocument(messageOne), TimeSpan.MaxValue, TimeSpan.Zero);
-            Assert.AreEqual(2, collection.Count());
+            Assert.AreEqual(2, collection.CountDocuments(new QueryDocument()));
 
             queue.Ack(result.Handle);
-            Assert.AreEqual(1, collection.Count());
-            Assert.AreEqual(0, gridfs.Files.Count());
-            Assert.AreEqual(0, gridfs.Chunks.Count());
+            Assert.AreEqual(1, collection.CountDocuments(new QueryDocument()));
+            Assert.AreEqual(0, gridfs.Find(new QueryDocument()).ToList().Count);
         }
 
         [Test]
@@ -517,15 +535,13 @@ namespace DominionEnterprises.Mongo.Tests
             for (var i = 0; i < handles.Length; ++i)
                 handles[i] = queue.Get(new QueryDocument("key", i), TimeSpan.MaxValue, TimeSpan.Zero).Handle;
 
-            Assert.AreEqual(Queue.ACK_MULTI_BATCH_SIZE + 1, collection.Count());
-            Assert.AreEqual(Queue.ACK_MULTI_BATCH_SIZE * 2, gridfs.Files.Count());
-            Assert.AreEqual(Queue.ACK_MULTI_BATCH_SIZE * 2, gridfs.Chunks.Count());
+            Assert.AreEqual(Queue.ACK_MULTI_BATCH_SIZE + 1, collection.CountDocuments(new QueryDocument()));
+            Assert.AreEqual(Queue.ACK_MULTI_BATCH_SIZE * 2, gridfs.Find(new QueryDocument()).ToList().Count);
 
             queue.AckMulti(handles);
 
-            Assert.AreEqual(1, collection.Count());
-            Assert.AreEqual(0, gridfs.Files.Count());
-            Assert.AreEqual(0, gridfs.Chunks.Count());
+            Assert.AreEqual(1, collection.CountDocuments(new QueryDocument()));
+            Assert.AreEqual(0, gridfs.Find(new QueryDocument()).ToList().Count);
         }
 
         [Test]
@@ -550,15 +566,13 @@ namespace DominionEnterprises.Mongo.Tests
                 queue.Get(new QueryDocument("key", 1), TimeSpan.MaxValue, TimeSpan.Zero).Handle,
             };
 
-            Assert.AreEqual(3, collection.Count());
-            Assert.AreEqual(2, gridfs.Files.Count());
-            Assert.AreEqual(2, gridfs.Chunks.Count());
+            Assert.AreEqual(3, collection.CountDocuments(new QueryDocument()));
+            Assert.AreEqual(2, gridfs.Find(new QueryDocument()).ToList().Count);
 
             queue.AckMulti(handles);
 
-            Assert.AreEqual(1, collection.Count());
-            Assert.AreEqual(0, gridfs.Files.Count());
-            Assert.AreEqual(0, gridfs.Chunks.Count());
+            Assert.AreEqual(1, collection.CountDocuments(new QueryDocument()));
+            Assert.AreEqual(0, gridfs.Find(new QueryDocument()).ToList().Count);
         }
 
         [Test]
@@ -588,7 +602,7 @@ namespace DominionEnterprises.Mongo.Tests
             queue.Send(new BsonDocument("key", "value"));
 
             var resultOne = queue.Get(new QueryDocument(messageOne), TimeSpan.MaxValue, TimeSpan.Zero);
-            Assert.AreEqual(2, collection.Count());
+            Assert.AreEqual(2, collection.CountDocuments(new QueryDocument()));
 
             using (var streamOne = new MemoryStream())
             using (var streamTwo = new MemoryStream())
@@ -599,7 +613,7 @@ namespace DominionEnterprises.Mongo.Tests
                 streamTwo.Position = 0;
                 queue.AckSend(resultOne.Handle, messageThree, DateTime.Now, 0.0, true, new Dictionary<string, Stream> { { "one", streamOne }, { "two", streamTwo } });
             }
-            Assert.AreEqual(2, collection.Count());
+            Assert.AreEqual(2, collection.CountDocuments(new QueryDocument()));
 
             var actual = queue.Get(new QueryDocument("hi", "there"), TimeSpan.MaxValue, TimeSpan.Zero);
             Assert.AreEqual(messageThree, actual.Payload);
@@ -607,8 +621,8 @@ namespace DominionEnterprises.Mongo.Tests
             Assert.AreEqual(111, actual.Streams["one"].ReadByte());
             Assert.AreEqual(222, actual.Streams["two"].ReadByte());
 
-            Assert.AreEqual(2, gridfs.Files.Count());
-            Assert.AreEqual(2, gridfs.Chunks.Count());
+            Assert.AreEqual(2, gridfs.Find(new QueryDocument()).ToList().Count);
+
         }
 
         [Test]
@@ -621,31 +635,31 @@ namespace DominionEnterprises.Mongo.Tests
             queue.Send(new BsonDocument("key", "value"));
 
             var resultOne = queue.Get(new QueryDocument(messageOne), TimeSpan.MaxValue, TimeSpan.Zero);
-            Assert.AreEqual(2, collection.Count());
+            Assert.AreEqual(2, collection.CountDocuments(new QueryDocument()));
 
             queue.AckSend(resultOne.Handle, messageThree);
 
             var resultTwo = queue.Get(new QueryDocument(messageThree), TimeSpan.MaxValue, TimeSpan.Zero);
             Assert.AreEqual(messageThree, resultTwo.Payload);
-            Assert.AreEqual(2, collection.Count());
+            Assert.AreEqual(2, collection.CountDocuments(new QueryDocument()));
 
             queue.AckSend(resultTwo.Handle, messageOne, DateTime.Now);
 
             var resultThree = queue.Get(new QueryDocument(messageOne), TimeSpan.MaxValue, TimeSpan.Zero);
             Assert.AreEqual(messageOne, resultThree.Payload);
-            Assert.AreEqual(2, collection.Count());
+            Assert.AreEqual(2, collection.CountDocuments(new QueryDocument()));
 
             queue.AckSend(resultThree.Handle, messageThree, DateTime.Now, 0.0);
 
             var resultFour = queue.Get(new QueryDocument(messageThree), TimeSpan.MaxValue, TimeSpan.Zero);
             Assert.AreEqual(messageThree, resultFour.Payload);
-            Assert.AreEqual(2, collection.Count());
+            Assert.AreEqual(2, collection.CountDocuments(new QueryDocument()));
 
             queue.AckSend(resultFour.Handle, messageOne, DateTime.Now, 0.0, true);
 
             var resultFive = queue.Get(new QueryDocument(messageOne), TimeSpan.MaxValue, TimeSpan.Zero);
             Assert.AreEqual(messageOne, resultFive.Payload);
-            Assert.AreEqual(2, collection.Count());
+            Assert.AreEqual(2, collection.CountDocuments(new QueryDocument()));
         }
 
         [Test]
@@ -691,14 +705,13 @@ namespace DominionEnterprises.Mongo.Tests
             queue.AckSend(resultOne.Handle, messageTwo, DateTime.Now, 0.0, true, null);
 
             var resultTwo = queue.Get(new QueryDocument(messageTwo), TimeSpan.MaxValue);
-            Assert.AreEqual(1, collection.Count());
+            Assert.AreEqual(1, collection.CountDocuments(new QueryDocument()));
             Assert.AreEqual(messageTwo, resultTwo.Payload);
 
             Assert.AreEqual(11, resultTwo.Streams["one"].ReadByte());
             Assert.AreEqual(22, resultTwo.Streams["two"].ReadByte());
 
-            Assert.AreEqual(2, gridfs.Files.Count());
-            Assert.AreEqual(2, gridfs.Chunks.Count());
+            Assert.AreEqual(2, gridfs.Find(new QueryDocument()).ToList().Count);
         }
         #endregion
 
@@ -713,7 +726,7 @@ namespace DominionEnterprises.Mongo.Tests
             using (var streamOne = new MemoryStream())
             using (var streamTwo = new MemoryStream())
             {
-                gridfs.Upload(streamOne, "one");//making sure same file names are ok as long as their ids are diffrent
+                gridfs.UploadFromStream("one", streamOne);//making sure same file names are ok as long as their ids are diffrent
 
                 streamOne.WriteByte(111);
                 streamTwo.WriteByte(222);
@@ -734,7 +747,7 @@ namespace DominionEnterprises.Mongo.Tests
                 //created added below
             };
 
-            var message = collection.FindOneAs<BsonDocument>();
+            var message = collection.Find(new QueryDocument()).First();
 
             var actualCreated = message["created"];
             expected["created"] = actualCreated;
@@ -749,14 +762,14 @@ namespace DominionEnterprises.Mongo.Tests
             expected.InsertAt(0, new BsonElement("_id", message["_id"]));
             Assert.AreEqual(expected, message);
 
-            var fileOne = gridfs.FindOneById(actualStreamIds[0]);
-            Assert.AreEqual("one", fileOne.Name);
-            using (var stream = fileOne.OpenRead())
+            var fileOne = gridfs.Find(new QueryDocument { { "_id", actualStreamIds[0] } }).First();
+            Assert.AreEqual("one", fileOne.Filename);
+            using (var stream = gridfs.OpenDownloadStream(fileOne.Id))
                 Assert.AreEqual(111, stream.ReadByte());
 
-            var fileTwo = gridfs.FindOneById(actualStreamIds[1]);
-            Assert.AreEqual("two", fileTwo.Name);
-            using (var stream = fileTwo.OpenRead())
+            var fileTwo = gridfs.Find(new QueryDocument { { "_id", actualStreamIds[1] } }).First();
+            Assert.AreEqual("two", fileTwo.Filename);
+            using (var stream = gridfs.OpenDownloadStream(fileTwo.Id))
                 Assert.AreEqual(222, stream.ReadByte());
         }
 
